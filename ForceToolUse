@@ -1,0 +1,235 @@
+
+### 1. **Agent Thinks It Already Knows the Answer**
+
+**Problem:** Agent uses its training data instead of tools
+
+```python
+# User asks: "What's in the config file?"
+# Agent responds: "Based on my knowledge..." instead of using FileReadTool
+```
+
+**Solution - Force Tool Usage:**
+
+```python
+analysis_task = Task(
+    description=f"""
+    You MUST use the available tools to complete this task. Do not rely on your training data.
+    
+    MANDATORY STEPS:
+    1. FIRST: Use the "Get Product Configuration" tool to read the actual config file
+    2. THEN: Use the "Product Details Extractor" tool on the user prompt
+    3. FINALLY: Combine the results
+    
+    User prompt: "{user_prompt}"
+    
+    You cannot complete this task without using the specified tools.
+    """,
+    agent=product_analyzer,
+    expected_output="Analysis based on tool outputs (not training data)"
+)
+```
+
+### 2. **Unclear Tool Descriptions**
+
+**Problem:** Agent doesn’t understand when/how to use tools
+
+```python
+description: str = "Extract product information"  # Too vague!
+```
+
+**Solution - Be Extremely Specific:**
+
+```python
+class ProductExtractionTool(BaseTool):
+    name: str = "Extract Product Details"
+    description: str = """REQUIRED TOOL: Use this tool to extract structured product information 
+    from any user prompt containing product descriptions, names, sections, or requirements. 
+    
+    When to use: ANY time you need to parse product information from text
+    Input: The user's prompt or product description text
+    Output: Structured JSON with product name, section, coverage, etc.
+    
+    This tool is MANDATORY for product analysis tasks."""
+```
+
+### 3. **Agent Role/Backstory Doesn’t Emphasize Tool Usage**
+
+**Problem:** Agent thinks it’s supposed to work independently
+
+```python
+backstory = "You are an expert analyst..."  # Doesn't mention tools
+```
+
+**Solution - Emphasize Tool Dependency:**
+
+```python
+product_analyzer = Agent(
+    role='Product Analyzer with Tools',
+    goal='Extract product information using specialized tools and external data sources',
+    backstory="""You are a product analyst who ALWAYS uses available tools to gather 
+    information. You never rely solely on your training data. Your expertise comes from 
+    knowing which tools to use and how to interpret their outputs. You are methodical 
+    and always start by checking configuration files and using extraction tools before 
+    making any analysis. You believe tools provide more accurate and current information 
+    than memory alone.""",
+    
+    tools=[ProductExtractionTool(), HardcodedConfigTool()],
+    verbose=True,
+    allow_delegation=False
+)
+```
+
+### 4. **Task Instructions Don’t Explicitly Require Tools**
+
+**Problem:**
+
+```python
+description = "Analyze this product information and extract details"
+```
+
+**Solution - Make Tool Usage Mandatory:**
+
+```python
+analysis_task = Task(
+    description=f"""
+    TOOL USAGE REQUIRED: You must use ALL available tools to complete this task.
+    
+    STEP 1 (MANDATORY): Use "Get Product Configuration" tool first
+    STEP 2 (MANDATORY): Use "Extract Product Details" tool with user prompt: "{user_prompt}"
+    STEP 3: Combine and validate results
+    
+    Failure to use these tools will result in incomplete analysis.
+    Do not proceed to step 3 until you have outputs from both tools.
+    """,
+    agent=product_analyzer,
+    expected_output="Complete analysis using outputs from both required tools"
+)
+```
+
+### 5. **Agent Configuration Issues**
+
+**Problem:** LLM settings make agent too “confident”
+
+```python
+llm_config = {"temperature": 0.9}  # Too creative, ignores instructions
+```
+
+**Solution - Lower Temperature & Add Instructions:**
+
+```python
+product_analyzer = Agent(
+    # ... other config
+    llm_config={
+        "temperature": 0.1,  # Very deterministic
+        "max_tokens": 2000,
+        "system_message": "You are required to use all available tools before providing analysis."
+    }
+)
+```
+
+### 6. **Tool Error Handling Makes Agent Give Up**
+
+**Problem:** Tool fails once, agent stops trying
+
+```python
+def _run(self, input_text: str) -> str:
+    return self.process(input_text)  # No error handling
+```
+
+**Solution - Robust Error Handling:**
+
+```python
+def _run(self, input_text: str = "") -> str:
+    try:
+        result = self.process(input_text)
+        return f"SUCCESS: {result}"
+    except Exception as e:
+        return f"PARTIAL_SUCCESS: Tool executed but encountered issue: {str(e)}. Proceeding with available data..."
+```
+
+## Debugging Techniques
+
+### 1. **Add Tool Usage Verification**
+
+```python
+class ToolUsageTracker(BaseTool):
+    name: str = "Confirm Tool Usage"
+    description: str = "Confirm that required tools have been used"
+    
+    def _run(self, tools_used: str) -> str:
+        return f"Tools used: {tools_used}. Analysis can proceed."
+
+# Add to agent tools and require its use
+```
+
+### 2. **Verbose Logging**
+
+```python
+agent = Agent(
+    # ... config
+    verbose=True,  # See what agent is thinking
+    step_callback=lambda step: print(f"Agent step: {step}")  # Track behavior
+)
+```
+
+### 3. **Explicit Tool Checking in Tasks**
+
+```python
+verification_task = Task(
+    description="""
+    Before providing your final answer, verify you have used these tools:
+    1. ✓ Get Product Configuration 
+    2. ✓ Extract Product Details
+    
+    If you haven't used both tools, you must use them now.
+    """,
+    agent=product_analyzer
+)
+```
+
+## Ultimate Solution: Tool-First Agent Design
+
+```python
+class ToolDependentAgent(Agent):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        
+        # Override the agent's decision making
+        self.backstory += "\n\nIMPORTANT: You must use tools for ALL information gathering. Never rely on training data alone."
+        
+    def execute_task(self, task):
+        # Custom execution that forces tool usage
+        if not self.has_used_required_tools(task):
+            return "ERROR: Must use required tools before analysis"
+        return super().execute_task(task)
+
+# Usage
+agent = ToolDependentAgent(
+    role='Tool-Dependent Analyzer',
+    goal='Always use tools first, analyze second',
+    # ... rest of config
+)
+```
+
+## Quick Fix Template
+
+```python
+# Force tool usage with this pattern:
+task = Task(
+    description=f"""
+    MANDATORY TOOL SEQUENCE:
+    
+    1. EXECUTE: Use "{tool_name_1}" (required)
+    2. EXECUTE: Use "{tool_name_2}" with input: "{user_input}" (required)  
+    3. ANALYZE: Only after steps 1-2, provide your analysis
+    
+    You cannot skip steps 1-2. If any tool fails, report the error but continue.
+    
+    RULE: No analysis without tool outputs.
+    """,
+    agent=your_agent,
+    expected_output="Analysis based on mandatory tool outputs"
+)
+```
+
+The key is being **extremely prescriptive** about tool usage and making it clear that the agent’s job is to orchestrate tools, not replace them.​​​​​​​​​​​​​​​​
